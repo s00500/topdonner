@@ -27,6 +27,8 @@ const usage = `usage:
   topdonner usb-info                         dump the camera's USB/UVC descriptors (webcam mode)
   sudo topdonner usb-record [-mode all|M,...] [-s SECS] [-o DIR]
                                              take the camera from macOS and record raw packets
+  sudo topdonner usb-xu                     read the camera's vendor and processing unit controls
+  sudo topdonner usb-xu-test [-sel N]       write 0..6 to a vendor control while streaming, measure, restore
   topdonner usb-analyze [-jpegs DIR] FILE    inspect a recording, extract JPEG frames`
 
 func main() {
@@ -50,6 +52,10 @@ func main() {
 		err = cmdUSBRecord(args)
 	case "usb-analyze":
 		err = cmdUSBAnalyze(args)
+	case "usb-xu":
+		err = cmdUSBXU(args)
+	case "usb-xu-test":
+		err = cmdUSBXUTest(args)
 	case "usb-frames":
 		err = cmdUSBFrames(args)
 	default:

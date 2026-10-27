@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/binary"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -40,20 +42,65 @@ func (f *liveFrame) Thermal() *Thermal {
 	return t
 }
 
-// live holds the latest frame and wakes long-polling HTTP clients.
+// live holds the latest frames and wakes waiting HTTP clients.
 type live struct {
 	mu     sync.Mutex
 	frame  *liveFrame
-	next   chan struct{} // closed when a newer frame arrives
+	next   chan struct{} // closed when a newer thermal frame arrives
 	status string
 	fps    float64
+
+	// The camera's own rendered video (MJPEG, ~24 fps, palette applied,
+	// stretched to 16:9). Only sent once the probe defaults were queried;
+	// before that the camera sends 1280x720 YUV instead, which is not served.
+	jpeg     []byte
+	jpegSeq  int64
+	jpegTime time.Time
+	jpegNext chan struct{}
+	videoFps float64
 }
 
-func newLive() *live { return &live{next: make(chan struct{}), status: "starting"} }
+func newLive() *live {
+	return &live{next: make(chan struct{}), jpegNext: make(chan struct{}), status: "starting"}
+}
+
+func (l *live) publishJPEG(b []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if dt := now.Sub(l.jpegTime).Seconds(); l.jpeg != nil && dt > 0 {
+		l.videoFps = 0.9*l.videoFps + 0.1/dt
+	}
+	l.jpeg, l.jpegTime = append([]byte(nil), b...), now
+	l.jpegSeq++
+	close(l.jpegNext)
+	l.jpegNext = make(chan struct{})
+}
+
+// waitJPEG returns the latest JPEG newer than seq, or nil once ctx ends.
+func (l *live) waitJPEG(ctx context.Context, seq int64) ([]byte, int64) {
+	for {
+		l.mu.Lock()
+		b, n, next := l.jpeg, l.jpegSeq, l.jpegNext
+		l.mu.Unlock()
+		if b != nil && n > seq {
+			return b, n
+		}
+		select {
+		case <-next:
+		case <-ctx.Done():
+			return nil, seq
+		}
+	}
+}
 
 func (l *live) publish(k10 []uint16) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// The camera often resends the previous temperature buffer unchanged.
+	if l.frame != nil && slices.Equal(l.frame.K10, k10) {
+		return
+	}
 	now := time.Now()
 	seq := int64(1)
 	if l.frame != nil {
@@ -114,10 +161,10 @@ func (l *live) capture(ctx context.Context, verbose bool) {
 				last = time.Now()
 				lastMu.Unlock()
 				l.publish(k)
+			} else if bytes.HasPrefix(frame, []byte{0xFF, 0xD8}) {
+				l.publishJPEG(frame)
 			}
 		})
-		// The camera ignores the negotiated format; the smallest one keeps
-		// the probe values sane.
 		if err := s.Start(uvc.Modes["mjpeg-360"], a.Push); err != nil {
 			l.setStatus(err.Error())
 			s.Close()
@@ -196,10 +243,14 @@ func cmdLive(args []string) error {
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		f := l.waitAfter(r.Context(), after, 2*time.Second)
 		l.mu.Lock()
-		status, fps := l.status, l.fps
+		status, fps, videoFps := l.status, l.fps, l.videoFps
+		if time.Since(l.jpegTime) > 2*time.Second {
+			videoFps = 0
+		}
 		l.mu.Unlock()
 		w.Header().Set("X-Status", status)
 		w.Header().Set("X-Fps", fmt.Sprintf("%.1f", fps))
+		w.Header().Set("X-Video-Fps", fmt.Sprintf("%.0f", videoFps))
 		if f == nil {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -209,6 +260,25 @@ func cmdLive(args []string) error {
 		w.Header().Set("X-Width", strconv.Itoa(uvc.ThermalW))
 		w.Header().Set("X-Height", strconv.Itoa(uvc.ThermalH))
 		binary.Write(w, binary.LittleEndian, f.K10)
+	})
+	// GET /video.mjpg streams the camera's rendered video for an <img>.
+	mux.HandleFunc("GET /video.mjpg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.Header().Set("Cache-Control", "no-store")
+		rc := http.NewResponseController(w)
+		var seq int64
+		for {
+			var b []byte
+			if b, seq = l.waitJPEG(r.Context(), seq); b == nil {
+				return
+			}
+			fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(b))
+			w.Write(b)
+			io.WriteString(w, "\r\n")
+			if rc.Flush() != nil {
+				return
+			}
+		}
 	})
 	mux.HandleFunc("POST /snapshot", func(w http.ResponseWriter, r *http.Request) {
 		l.mu.Lock()
@@ -230,7 +300,9 @@ func cmdLive(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: mux}
+	// Requests inherit ctx so the long-lived video stream ends on Ctrl-C;
+	// Shutdown alone would wait for it forever.
+	srv := &http.Server{Handler: mux, BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() {
 		<-ctx.Done()
 		srv.Shutdown(context.Background())

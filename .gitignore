@@ -1,0 +1,5 @@
+.scratchpad/
+.playwright-mcp/
+.DS_Store
+/topdonner
+captures/

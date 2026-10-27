@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TC004 Live</title>
+<style>
+  :root {
+    --bg: #111214; --panel: #1b1d21; --line: #2c2f35; --text: #e6e6e6; --dim: #9096a0;
+    --hot: #ff5a3c; --cold: #4aa8ff; --accent: #ffb020;
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); display: flex; gap: 16px; padding: 16px; height: 100vh; }
+  #view { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  #screen { max-width: 100%; max-height: 100%; cursor: crosshair; border-radius: 6px; background: #000; }
+  aside { width: 280px; flex: none; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; padding: 2px 0; }
+  .row span:first-child { color: var(--dim); }
+  .big { font-size: 28px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .num { font-variant-numeric: tabular-nums; }
+  .hot { color: var(--hot); } .cold { color: var(--cold); }
+  #status { display: flex; align-items: center; gap: 8px; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+  #dot.ok { background: #3ccf6e; } #dot.bad { background: var(--hot); }
+  select, input, button { font: inherit; color: var(--text); background: #25282d; border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  input[type=number] { width: 72px; }
+  button { cursor: pointer; } button:hover { border-color: var(--dim); }
+  button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
+  .controls { display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: center; }
+  .buttons { display: flex; gap: 8px; }
+  .buttons button { flex: 1; }
+  #bar { height: 12px; border-radius: 3px; margin: 4px 0 2px; }
+  #saved { color: var(--dim); font-size: 12px; word-break: break-all; min-height: 1em; }
+  @media (max-width: 720px) { body { flex-direction: column; height: auto; } aside { width: auto; } }
+</style>
+</head>
+<body>
+<div id="view"><canvas id="screen"></canvas></div>
+<aside>
+  <section>
+    <div id="status"><div id="dot"></div><span id="statusText">connecting…</span></div>
+    <div class="row"><span>Frame rate</span><span id="fps" class="num">–</span></div>
+  </section>
+  <section>
+    <h2>Cursor</h2>
+    <div class="big" id="cursor">–</div>
+    <div class="row"><span>Pixel</span><span id="cursorXY" class="num">–</span></div>
+  </section>
+  <section>
+    <h2>Frame</h2>
+    <div class="row"><span>Max ▲</span><span id="max" class="num hot">–</span></div>
+    <div class="row"><span>Min ▼</span><span id="min" class="num cold">–</span></div>
+    <div class="row"><span>Centre ＋</span><span id="centre" class="num">–</span></div>
+    <div class="row"><span>Mean</span><span id="mean" class="num">–</span></div>
+  </section>
+  <section>
+    <h2>Display</h2>
+    <div class="controls">
+      <label for="palette">Palette</label>
+      <select id="palette">
+        <option value="ironbow">Ironbow</option>
+        <option value="rainbow">Rainbow</option>
+        <option value="white">White hot</option>
+        <option value="black">Black hot</option>
+      </select>
+      <label for="range">Range</label>
+      <select id="range"><option value="auto">Auto</option><option value="fixed">Fixed</option></select>
+      <label for="lo">Low °C</label><input id="lo" type="number" step="0.5" value="15">
+      <label for="hi">High °C</label><input id="hi" type="number" step="0.5" value="40">
+    </div>
+    <canvas id="bar" width="256" height="1" style="width:100%"></canvas>
+    <div class="row num"><span id="barLo">–</span><span id="barHi">–</span></div>
+  </section>
+  <section>
+    <div class="buttons">
+      <button id="pause">Pause</button>
+      <button id="snap" class="primary">Snapshot</button>
+    </div>
+    <div id="saved"></div>
+  </section>
+</aside>
+<script>
+const W = 180, H = 240;
+const $ = id => document.getElementById(id);
+const screen = $("screen"), sctx = screen.getContext("2d");
+const off = document.createElement("canvas"); off.width = W; off.height = H;
+const octx = off.getContext("2d"), img = octx.createImageData(W, H);
+
+const stops = {
+  ironbow: [[0,0,0],[32,0,140],[204,0,119],[255,165,0],[255,255,220]],
+  rainbow: [[0,0,140],[0,120,255],[0,220,120],[255,230,0],[255,60,0],[255,255,255]],
+  white:   [[0,0,0],[255,255,255]],
+  black:   [[255,255,255],[0,0,0]],
+};
+function lut(name) {
+  const s = stops[name], out = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255 * (s.length - 1), j = Math.min(Math.floor(v), s.length - 2), k = v - j;
+    for (let c = 0; c < 3; c++) out[i*3+c] = s[j][c] + (s[j+1][c] - s[j][c]) * k;
+  }
+  return out;
+}
+let palette = lut("ironbow");
+
+let temps = null, seq = 0, paused = false, hover = null, stats = null;
+const fmt = t => t == null ? "–" : t.toFixed(1) + " °C";
+
+function drawBar(lo, hi) {
+  const b = $("bar"), bctx = b.getContext("2d"), d = bctx.createImageData(256, 1);
+  for (let i = 0; i < 256; i++) { d.data.set(palette.subarray(i*3, i*3+3), i*4); d.data[i*4+3] = 255; }
+  bctx.putImageData(d, 0, 0);
+  $("barLo").textContent = fmt(lo); $("barHi").textContent = fmt(hi);
+}
+
+function fit() {
+  const v = $("view").getBoundingClientRect(), s = Math.max(1, Math.min(v.width / W, v.height / H));
+  const dpr = window.devicePixelRatio || 1;
+  screen.style.width = W * s + "px"; screen.style.height = H * s + "px";
+  screen.width = Math.round(W * s * dpr); screen.height = Math.round(H * s * dpr);
+  render();
+}
+
+function render() {
+  if (!temps) return;
+  let min = Infinity, max = -Infinity, sum = 0, minI = 0, maxI = 0;
+  for (let i = 0; i < temps.length; i++) {
+    const t = temps[i]; sum += t;
+    if (t < min) { min = t; minI = i; }
+    if (t > max) { max = t; maxI = i; }
+  }
+  stats = { min, max, minI, maxI, mean: sum / temps.length, centre: temps[(H >> 1) * W + (W >> 1)] };
+  let lo = min, hi = max;
+  if ($("range").value === "fixed") { lo = +$("lo").value; hi = +$("hi").value; }
+  const span = Math.max(hi - lo, 0.1);
+  for (let i = 0; i < temps.length; i++) {
+    const p = Math.max(0, Math.min(255, Math.round((temps[i] - lo) / span * 255))) * 3;
+    img.data[i*4] = palette[p]; img.data[i*4+1] = palette[p+1]; img.data[i*4+2] = palette[p+2]; img.data[i*4+3] = 255;
+  }
+  octx.putImageData(img, 0, 0);
+  sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(off, 0, 0, screen.width, screen.height);
+
+  const sx = screen.width / W, sy = screen.height / H, u = screen.width / 360;
+  const mark = (i, color, up) => {
+    const x = (i % W + .5) * sx, y = (Math.floor(i / W) + .5) * sy, r = 7 * u;
+    sctx.beginPath();
+    if (up) { sctx.moveTo(x, y - r); sctx.lineTo(x - r, y + r * .7); sctx.lineTo(x + r, y + r * .7); }
+    else { sctx.moveTo(x, y + r); sctx.lineTo(x - r, y - r * .7); sctx.lineTo(x + r, y - r * .7); }
+    sctx.closePath(); sctx.fillStyle = color; sctx.fill();
+    sctx.lineWidth = 1.5 * u; sctx.strokeStyle = "#000"; sctx.stroke();
+  };
+  mark(maxI, "#ff5a3c", true); mark(minI, "#4aa8ff", false);
+  const cx = screen.width / 2, cy = screen.height / 2, c = 10 * u;
+  sctx.lineWidth = 2 * u; sctx.strokeStyle = "rgba(255,255,255,.85)";
+  sctx.beginPath(); sctx.moveTo(cx - c, cy); sctx.lineTo(cx + c, cy); sctx.moveTo(cx, cy - c); sctx.lineTo(cx, cy + c); sctx.stroke();
+  if (hover) {
+    const hx = (hover.x + .5) * sx, hy = (hover.y + .5) * sy;
+    sctx.lineWidth = 1.5 * u; sctx.strokeStyle = "rgba(255,255,255,.9)";
+    sctx.strokeRect(hx - 5 * u, hy - 5 * u, 10 * u, 10 * u);
+  }
+
+  $("max").textContent = fmt(max); $("min").textContent = fmt(min);
+  $("centre").textContent = fmt(stats.centre); $("mean").textContent = fmt(stats.mean);
+  updateCursor();
+  drawBar(lo, hi);
+}
+
+function updateCursor() {
+  if (!hover || !temps) { $("cursor").textContent = "–"; $("cursorXY").textContent = "–"; return; }
+  $("cursor").textContent = fmt(temps[hover.y * W + hover.x]);
+  $("cursorXY").textContent = hover.x + ", " + hover.y;
+}
+
+screen.addEventListener("mousemove", e => {
+  const r = screen.getBoundingClientRect();
+  hover = { x: Math.min(W - 1, Math.floor((e.clientX - r.left) / r.width * W)),
+            y: Math.min(H - 1, Math.floor((e.clientY - r.top) / r.height * H)) };
+  render();
+});
+screen.addEventListener("mouseleave", () => { hover = null; render(); });
+$("palette").addEventListener("change", e => { palette = lut(e.target.value); render(); });
+for (const id of ["range", "lo", "hi"]) $(id).addEventListener("input", render);
+$("pause").addEventListener("click", () => { paused = !paused; $("pause").textContent = paused ? "Resume" : "Pause"; });
+$("snap").addEventListener("click", async () => {
+  $("saved").textContent = "saving…";
+  try {
+    const r = await fetch("/snapshot", { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+    const j = await r.json();
+    $("saved").textContent = "saved " + j.name + ".png / .csv / .raw";
+  } catch (e) { $("saved").textContent = "snapshot failed: " + e.message; }
+});
+window.addEventListener("resize", fit);
+
+function setStatus(text, ok) {
+  $("statusText").textContent = text;
+  $("dot").className = ok === true ? "ok" : ok === false ? "bad" : "";
+}
+
+async function poll() {
+  for (;;) {
+    if (paused) { await new Promise(r => setTimeout(r, 200)); continue; }
+    try {
+      const r = await fetch("/frame?after=" + seq);
+      const status = r.headers.get("X-Status") || "";
+      $("fps").textContent = r.headers.get("X-Fps") + " fps";
+      if (r.status === 200) {
+        seq = +r.headers.get("X-Seq");
+        const k = new Uint16Array(await r.arrayBuffer());
+        temps = new Float32Array(k.length);
+        for (let i = 0; i < k.length; i++) temps[i] = k[i] / 10 - 273.15;
+        setStatus(status, true);
+        render();
+      } else {
+        setStatus(status, false);
+      }
+    } catch (e) {
+      setStatus("server not reachable", false);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+}
+fit();
+poll();
+</script>
+</body>
+</html>

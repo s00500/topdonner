@@ -3,6 +3,10 @@
 Get real temperature data out of a **Topdon TC004** thermal camera on a Mac —
 live over USB, or from the `.irg` files it saves.
 
+| Camera video + raw readouts | Raw temperatures, own palette |
+| --- | --- |
+| ![Live view showing the camera's MJPEG video](docs/live-video.png) | ![Live view rendering the raw temperature frame](docs/live-raw.png) |
+
 ## The camera
 
 The TC004 is an InfiRay-based handheld. Over USB it shows up as

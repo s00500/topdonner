@@ -9,6 +9,8 @@ live over USB, or from the `.irg` files it saves.
 
 ## The camera
 
+<img src="docs/tc004.png" alt="Topdon TC004" width="220" align="right">
+
 The TC004 is an InfiRay-based handheld. Over USB it shows up as
 "Iray MCamera" (`12d1:0000`) and has two modes:
 

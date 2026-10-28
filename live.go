@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"topdonner/uvc"
+	"github.com/s00500/topdonner/uvc"
 )
 
 //go:embed live.html

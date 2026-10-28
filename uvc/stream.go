@@ -61,19 +61,12 @@ const (
 	vsCommit = 0x02
 )
 
-// Format/frame indices from the camera's descriptors (see usb-info).
-type Mode struct {
-	Format, Frame byte
-	Name          string
-}
+// Mode is a format/frame index pair from the camera's descriptors.
+type Mode struct{ Format, Frame byte }
 
-var Modes = map[string]Mode{
-	"yuy2-480":   {1, 1, "YUY2 640x480"},
-	"mjpeg-360":  {2, 1, "MJPEG 640x360"},
-	"mjpeg-720":  {2, 2, "MJPEG 1280x720"},
-	"mjpeg-1080": {2, 3, "MJPEG 1920x1080"},
-	"h264-360":   {3, 1, "H264 640x360"},
-}
+// MJPEG360 is the smallest video mode. The thermal frames come regardless of
+// the mode; this one keeps the video cheap.
+var MJPEG360 = Mode{Format: 2, Frame: 1}
 
 // Stream owns the camera between Open and Close. While started, every
 // non-empty iso packet is handed to OnPacket on the libusb event goroutine;
@@ -87,9 +80,6 @@ type Stream struct {
 	done     chan struct{}
 
 	OnPacket func(data []byte)
-	Probe    []byte // the committed probe/commit block
-
-	Packets, Empty, Errors atomic.Int64
 }
 
 var (
@@ -130,33 +120,21 @@ func Open() (*Stream, error) {
 	return s, nil
 }
 
-// ProbeInfo returns the camera's answers to the probe control queries
-// (GET_LEN, GET_INFO, GET_DEF, GET_MIN, GET_MAX, GET_CUR) for diagnostics.
-func (s *Stream) ProbeInfo() map[string][]byte {
-	out := map[string][]byte{}
+// queryProbe asks the camera for its probe control info, length and
+// default/min/max/current values, answers ignored.
+func (s *Stream) queryProbe() {
 	for _, q := range []struct {
-		name string
-		req  C.uint8_t
-		n    int
-	}{{"LEN", getLen, 2}, {"INFO", getInfo, 1}, {"DEF", getDef, 34}, {"MIN", getMin, 34}, {"MAX", getMax, 34}, {"CUR", getCur, 34}} {
-		b := make([]byte, q.n)
-		n, err := s.control(q.req, vsProbe, b)
-		if err != nil {
-			out[q.name] = []byte(err.Error())
-			continue
-		}
-		out[q.name] = b[:n]
+		req C.uint8_t
+		n   int
+	}{{getLen, 2}, {getInfo, 1}, {getDef, 34}, {getMin, 34}, {getMax, 34}, {getCur, 34}} {
+		s.control(q.req, vsProbe, make([]byte, q.n))
 	}
-	return out
 }
 
 // Start negotiates mode, selects the streaming alt setting and keeps iso
 // transfers in flight until Stop.
 func (s *Stream) Start(mode Mode, onPacket func([]byte)) error {
 	s.OnPacket = onPacket
-	s.Packets.Store(0)
-	s.Empty.Store(0)
-	s.Errors.Store(0)
 	s.stopping.Store(false)
 	s.done = make(chan struct{})
 	if err := s.negotiate(mode); err != nil {
@@ -184,9 +162,10 @@ func (s *Stream) Start(mode Mode, onPacket func([]byte)) error {
 
 // negotiate runs the UVC probe/commit handshake for the requested mode.
 func (s *Stream) negotiate(mode Mode) error {
-	// Windows and Linux query the probe control before setting it. The only
-	// runs that got frames did the same; the ones that skipped it got none.
-	s.ProbeInfo()
+	// Windows and Linux query the probe control before setting it. Without
+	// this the camera streams nothing, or only its 1280x720 YUV video
+	// instead of MJPEG.
+	s.queryProbe()
 
 	probe := make([]byte, 34)                   // UVC 1.1 probe/commit block
 	binary.LittleEndian.PutUint16(probe[0:], 1) // bmHint: keep dwFrameInterval
@@ -202,7 +181,6 @@ func (s *Stream) negotiate(mode Mode) error {
 	if _, err := s.control(setCur, vsCommit, probe); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
-	s.Probe = probe
 	return nil
 }
 
@@ -233,20 +211,10 @@ func goTransferDone(t *C.struct_libusb_transfer) {
 	if t.status == C.LIBUSB_TRANSFER_COMPLETED {
 		for i := range C.int(t.num_iso_packets) {
 			n := C.packet_len(t, i)
-			switch {
-			case C.packet_status(t, i) != 0:
-				s.Errors.Add(1)
-			case n == 0:
-				s.Empty.Add(1)
-			default:
-				s.Packets.Add(1)
-				if s.OnPacket != nil {
-					s.OnPacket(unsafe.Slice((*byte)(unsafe.Pointer(C.packet_buf(t, i))), n))
-				}
+			if C.packet_status(t, i) == 0 && n > 0 && s.OnPacket != nil {
+				s.OnPacket(unsafe.Slice((*byte)(unsafe.Pointer(C.packet_buf(t, i))), n))
 			}
 		}
-	} else if t.status != C.LIBUSB_TRANSFER_CANCELLED {
-		s.Errors.Add(1)
 	}
 	if s.stopping.Load() || t.status == C.LIBUSB_TRANSFER_NO_DEVICE || C.libusb_submit_transfer(t) < 0 {
 		s.pending.Add(-1)

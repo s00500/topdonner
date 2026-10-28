@@ -3,20 +3,25 @@ package uvc
 import (
 	"bytes"
 	"encoding/binary"
-	"os"
 )
 
-// Whatever format is negotiated, the TC004 sends the same two frame kinds,
-// alternating, with clean FID/EOF framing:
+// Whatever format is negotiated, the TC004 interleaves two frame kinds with
+// clean FID/EOF framing:
 //
 //   - thermal: 10-byte marker FF 00 FF 00 FF 00 FF 00 FF 00, then
 //     ThermalW*ThermalH uint16 LE temperatures in Kelvin x10, row-major,
-//     portrait like the camera's .irg files
-//   - video:   1280x720 YUV 4:2:0 semi-planar, the upscaled grey image
-//     stretched to 16:9, no overlay
+//     portrait like the camera's .irg files; ~4.5 new frames per second
+//   - video:   the camera's rendered picture stretched to 16:9, MJPEG at
+//     ~24 fps once negotiated properly, otherwise 1280x720 YUV 4:2:0
 const (
 	ThermalW = 180
 	ThermalH = 240
+)
+
+// UVC payload header bits (bmHeaderInfo).
+const (
+	hdrFID = 1 << 0
+	hdrEOF = 1 << 1
 )
 
 var thermalMarker = []byte{0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00}
@@ -68,15 +73,4 @@ func ThermalFrame(frame []byte) ([]uint16, bool) {
 		k[i] = binary.LittleEndian.Uint16(frame[10+2*i:])
 	}
 	return k, true
-}
-
-// Replay feeds a usb-record recording through an Assembler.
-func Replay(path string, onFrame func([]byte)) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	a := NewAssembler(onFrame)
-	return readPackets(f, a.Push)
 }

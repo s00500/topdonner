@@ -165,7 +165,7 @@ func (l *live) capture(ctx context.Context, verbose bool) {
 				l.publishJPEG(frame)
 			}
 		})
-		if err := s.Start(uvc.Modes["mjpeg-360"], a.Push); err != nil {
+		if err := s.Start(uvc.MJPEG360, a.Push); err != nil {
 			l.setStatus(err.Error())
 			s.Close()
 			sleepCtx(ctx, 2*time.Second)

@@ -1,5 +1,6 @@
-// topdonner reads radiometric .irg files from a Topdon TC004 (and other
-// InfiRay-based cameras) and turns them into temperature data.
+// topdonner reads temperature data from a Topdon TC004: live over USB in
+// webcam mode, or from the radiometric .irg files it saves (also those of
+// other InfiRay-based cameras).
 package main
 
 import (
@@ -10,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"topdonner/uvc"
 )
 
 const usage = `usage:
@@ -23,13 +22,7 @@ const usage = `usage:
                                              copy new .irg/.jpg files off the camera
                                              (mounted in USB storage mode) and convert them
   topdonner live [-addr HOST:PORT] [-o DIR]  live raw temperatures from the camera in webcam mode,
-                                             shown in the browser (needs sudo after replugging)
-  topdonner usb-info                         dump the camera's USB/UVC descriptors (webcam mode)
-  sudo topdonner usb-record [-mode all|M,...] [-s SECS] [-o DIR]
-                                             take the camera from macOS and record raw packets
-  sudo topdonner usb-xu                     read the camera's vendor and processing unit controls
-  sudo topdonner usb-xu-test [-sel N]       write 0..6 to a vendor control while streaming, measure, restore
-  topdonner usb-analyze [-jpegs DIR] FILE    inspect a recording, extract JPEG frames`
+                                             shown in the browser (needs sudo after replugging)`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -46,18 +39,6 @@ func main() {
 		err = cmdImport(args)
 	case "live":
 		err = cmdLive(args)
-	case "usb-info":
-		err = uvc.DumpDescriptors(os.Stdout)
-	case "usb-record":
-		err = cmdUSBRecord(args)
-	case "usb-analyze":
-		err = cmdUSBAnalyze(args)
-	case "usb-xu":
-		err = cmdUSBXU(args)
-	case "usb-xu-test":
-		err = cmdUSBXUTest(args)
-	case "usb-frames":
-		err = cmdUSBFrames(args)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
